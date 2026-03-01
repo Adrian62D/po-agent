@@ -232,7 +232,7 @@ runs:
           if [ "$CLI_VERSION" = "latest" ]; then
             curl -fsSL https://claude.ai/install.sh | bash
           else
-            curl -fsSL https://claude.ai/install.sh | bash -s -- --version "$CLI_VERSION"
+            curl -fsSL https://claude.ai/install.sh | bash -s -- "$CLI_VERSION"
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         fi
