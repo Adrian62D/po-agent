@@ -383,7 +383,7 @@ runs:
         SLACK_BOT_TOKEN_ENV: ${{ steps.source.outputs.slack_bot_token }}
         SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
         SLACK_THREAD_TS: ${{ steps.source.outputs.slack_thread_ts }}
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
+        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id }}
       run: |
         CONTEXT_FILE="/tmp/conversation_context.txt"
         touch "$CONTEXT_FILE"
@@ -884,12 +884,12 @@ runs:
         fi
 
     - name: Post response to Azure DevOps
-      if: always() && (steps.source.outputs.source == 'azure-devops' || steps.source.outputs.azdo_work_item_id != '') && steps.source.outputs.skip != 'true'
+      if: always() && (steps.source.outputs.source == 'azure-devops' || steps.source.outputs.work_item_id != '' || steps.context.outputs.azdo_work_item_id != '') && steps.source.outputs.skip != 'true'
       shell: bash
       env:
         SOURCE: ${{ steps.source.outputs.source }}
         COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
+        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id || steps.context.outputs.azdo_work_item_id }}
         RESUME_ATTEMPT: ${{ steps.source.outputs.resume_attempt }}
       run: |
         if [ -z "$AZURE_DEVOPS_PAT" ] || [ -z "$AZURE_DEVOPS_ORG" ] || [ -z "$AZDO_WORK_ITEM_ID" ]; then
@@ -1006,7 +1006,7 @@ runs:
         SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
         SLACK_MESSAGE_TS: ${{ steps.source.outputs.slack_message_ts }}
         GH_TOKEN: ${{ inputs.github_token }}
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
+        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id || steps.context.outputs.azdo_work_item_id }}
       run: |
         CANCEL_MSG="⚠️ **PO Agent run was cancelled.**"
         PARTIAL=""
