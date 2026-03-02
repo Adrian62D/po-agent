@@ -37,68 +37,136 @@ runs:
           done <<< "$SECRETS_INPUT"
         fi
 
-    - name: Check workflows and resume
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Setup state-backend scripts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        ACTION_DIR="${{ github.action_path }}/.."
+        WORKSPACE="$GITHUB_WORKSPACE"
+
+        # Install tsx globally
+        npm install -g tsx 2>/dev/null || true
+
+        # Helper: create a shell shim that calls tsx on a .ts file
+        create_ts_shim() {
+          local name="$1"
+          local ts_path="$2"
+          printf '#!/bin/bash\nexec tsx "%s" "$@"\n' "$ts_path" > "/tmp/shim-${name}"
+          chmod +x "/tmp/shim-${name}"
+          sudo mv "/tmp/shim-${name}" "/usr/local/bin/${name}"
+        }
+
+        # Link framework .ts scripts with -default suffix
+        if [ -d "$ACTION_DIR/scripts" ]; then
+          for script in "$ACTION_DIR"/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            create_ts_shim "${name}-default" "$script"
+            echo "SCRIPT (framework default): ${name}-default"
+          done
+        fi
+
+        # Link consumer .ts overrides (or fall back to framework)
+        if [ -d "$ACTION_DIR/scripts" ]; then
+          for script in "$ACTION_DIR"/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            if [ -f "$WORKSPACE/.po-agent/scripts/${name}.ts" ]; then
+              create_ts_shim "$name" "$WORKSPACE/.po-agent/scripts/${name}.ts"
+              echo "SCRIPT (consumer override): $name"
+            else
+              create_ts_shim "$name" "$script"
+              echo "SCRIPT (framework): $name"
+            fi
+          done
+        fi
+
+        # Also link any consumer-only .ts scripts not in framework
+        if [ -d "$WORKSPACE/.po-agent/scripts" ]; then
+          for script in "$WORKSPACE"/.po-agent/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            if [ ! -f "/usr/local/bin/$name" ]; then
+              create_ts_shim "$name" "$script"
+              echo "SCRIPT (consumer only): $name"
+            fi
+          done
+        fi
+
+    - name: Check state and workflows
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        WORK_ITEM_ID: ${{ inputs.work_item_id }}
+      run: |
+        EVENT=$(cat "$GITHUB_EVENT_PATH")
+        WF_NAME=$(echo "$EVENT" | jq -r '.workflow_run.name')
+        WF_CONCLUSION=$(echo "$EVENT" | jq -r '.workflow_run.conclusion')
+        echo "Workflow \"$WF_NAME\" completed: $WF_CONCLUSION"
+
+        # Get associated PR
+        PR_NUMBER=$(echo "$EVENT" | jq -r '.workflow_run.pull_requests[0].number // empty')
+        if [ -z "$PR_NUMBER" ]; then
+          echo "No PR associated — skipping"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "PR #$PR_NUMBER"
+        echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+        # Resolve entity and check if waiting
+        ENTITY=$(state-backend resolve-entity "$PR_NUMBER" 2>/dev/null || echo "$PR_NUMBER")
+        echo "entity=$ENTITY" >> "$GITHUB_OUTPUT"
+
+        if ! state-backend is-waiting "$ENTITY" 2>/dev/null; then
+          echo "Entity $ENTITY is not in waiting-ci state — skipping"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Get attempt count
+        CURRENT_ATTEMPT=$(state-backend get-attempt "$ENTITY" 2>/dev/null || echo "0")
+        MAX_ATTEMPTS="${MAX_ATTEMPTS:-10}"
+        echo "Current attempt: $CURRENT_ATTEMPT, max: $MAX_ATTEMPTS"
+
+        if [ "$CURRENT_ATTEMPT" -ge "$MAX_ATTEMPTS" ]; then
+          echo "Max $MAX_ATTEMPTS attempts reached — stopping"
+          state-backend on-max-attempts "$ENTITY" "$MAX_ATTEMPTS" 2>/dev/null || true
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "current_attempt=$CURRENT_ATTEMPT" >> "$GITHUB_OUTPUT"
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+
+    - name: Check workflow statuses
+      if: steps.check.outputs.skip != 'true'
+      id: workflows
       uses: actions/github-script@v7
       env:
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         REQUIRED_WORKFLOWS: ${{ inputs.required_workflows }}
         OPTIONAL_WORKFLOWS: ${{ inputs.optional_workflows }}
-        WORK_ITEM_ID: ${{ inputs.work_item_id }}
       with:
         github-token: ${{ inputs.github_token }}
         script: |
           const workflowRun = context.payload.workflow_run;
-          console.log(`Workflow "${workflowRun.name}" completed: ${workflowRun.conclusion}`);
+          const prNumber = parseInt('${{ steps.check.outputs.pr_number }}', 10);
 
-          // Get associated PR
-          const prs = workflowRun.pull_requests;
-          if (!prs || prs.length === 0) {
-            console.log('No PR associated — skipping');
-            return;
-          }
-          const pr = prs[0];
-          console.log(`PR #${pr.number}`);
-
-          // Check if this PR has a po-agent label indicating it's waiting
+          // Get PR head SHA
           const { data: prData } = await github.rest.pulls.get({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            pull_number: pr.number
+            pull_number: prNumber
           });
           const headSha = prData.head.sha;
-
-          const labels = prData.labels.map(l => l.name);
-          const isWaiting = labels.includes('po-agent:waiting-ci');
-          if (!isWaiting) {
-            console.log('PR does not have po-agent:waiting-ci label — skipping');
-            return;
-          }
-
-          // Get attempt count from labels
-          const attemptLabel = labels.find(l => l.startsWith('po-agent:attempt-'));
-          const currentAttempt = attemptLabel ? parseInt(attemptLabel.split('-')[1], 10) : 0;
-          const maxAttempts = parseInt(process.env.MAX_ATTEMPTS || '10', 10);
-
-          if (currentAttempt >= maxAttempts) {
-            console.log(`Max ${maxAttempts} attempts reached — stopping`);
-            // Remove waiting label, add failed
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: pr.number, name: 'po-agent:waiting-ci'
-              });
-            } catch {}
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, labels: ['po-agent:failed']
-            });
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number,
-              body: `⚠️ **PO Agent stopped after ${maxAttempts} attempts.** Please review and re-trigger manually if needed.`
-            });
-            return;
-          }
 
           // Check required workflows
           const { data: workflows } = await github.rest.actions.listRepoWorkflows({
@@ -110,7 +178,6 @@ runs:
           const optionalNames = (process.env.OPTIONAL_WORKFLOWS || '')
             .split(',').map(s => s.trim()).filter(Boolean);
 
-          // If no required workflows specified, use the triggering workflow
           if (requiredNames.length === 0) {
             requiredNames.push(workflowRun.name);
           }
@@ -147,63 +214,57 @@ runs:
 
           console.log('Workflow statuses:', JSON.stringify(statuses, null, 2));
 
-          if (!allCompleted) {
-            console.log('Not all workflows completed — waiting');
-            return;
-          }
-
-          // All done — dispatch resume
-          const nextAttempt = currentAttempt + 1;
-          const overallResult = anyFailed ? 'failure' : 'success';
           const summary = Object.entries(statuses).map(([n, s]) => `${n}: ${s}`).join(', ');
+          const overallResult = anyFailed ? 'failure' : 'success';
 
-          // Update labels
-          if (attemptLabel) {
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: pr.number, name: attemptLabel
-              });
-            } catch {}
-          }
-          try {
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, name: 'po-agent:waiting-ci'
-            });
-          } catch {}
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner, repo: context.repo.repo,
-            issue_number: pr.number,
-            labels: ['po-agent:in-progress', `po-agent:attempt-${nextAttempt}`]
-          });
+          core.setOutput('all_completed', allCompleted.toString());
+          core.setOutput('any_failed', anyFailed.toString());
+          core.setOutput('overall_result', overallResult);
+          core.setOutput('summary', summary);
 
-          // Dispatch resume event
-          console.log(`Dispatching resume for PR #${pr.number} (attempt ${nextAttempt}, result: ${overallResult})`);
-          const payload = {
-            pr_number: pr.number,
-            trigger_workflow: workflowRun.name,
-            trigger_result: overallResult,
-            workflow_summary: summary,
-            attempt: nextAttempt
-          };
+    - name: Dispatch resume
+      if: steps.check.outputs.skip != 'true' && steps.workflows.outputs.all_completed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ steps.check.outputs.pr_number }}
+        ENTITY: ${{ steps.check.outputs.entity }}
+        CURRENT_ATTEMPT: ${{ steps.check.outputs.current_attempt }}
+        OVERALL_RESULT: ${{ steps.workflows.outputs.overall_result }}
+        SUMMARY: ${{ steps.workflows.outputs.summary }}
+        WORK_ITEM_ID: ${{ inputs.work_item_id }}
+      run: |
+        EVENT=$(cat "$GITHUB_EVENT_PATH")
+        WF_NAME=$(echo "$EVENT" | jq -r '.workflow_run.name')
 
-          // Pass through work_item_id for AzDo integration
-          // Priority: explicit input > detected from PR title
-          let workItemId = process.env.WORK_ITEM_ID;
-          if (!workItemId) {
-            // Try to detect from PR title (VYZN-1234 or AB#1234)
-            const titleMatch = prData.title?.match(/(?:AB#|VYZN-)(\d+)/);
-            if (titleMatch) workItemId = titleMatch[1];
-          }
-          if (workItemId) {
-            payload.work_item_id = workItemId;
-            console.log(`Including work_item_id: ${workItemId}`);
-          }
+        NEXT_ATTEMPT=$((CURRENT_ATTEMPT + 1))
 
-          await github.rest.repos.createDispatchEvent({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            event_type: 'po-agent-resume',
-            client_payload: payload
-          });
+        # Update state: increment attempt and set in-progress
+        ACTUAL_ATTEMPT=$(state-backend increment-attempt "$ENTITY" 2>/dev/null || echo "$NEXT_ATTEMPT")
+        state-backend set-status "$ENTITY" in-progress 2>/dev/null || true
+
+        echo "Dispatching resume for PR #$PR_NUMBER (attempt $ACTUAL_ATTEMPT, result: $OVERALL_RESULT)"
+
+        # Build dispatch payload
+        PAYLOAD=$(jq -n \
+          --argjson pr_number "$PR_NUMBER" \
+          --arg trigger_workflow "$WF_NAME" \
+          --arg trigger_result "$OVERALL_RESULT" \
+          --arg workflow_summary "$SUMMARY" \
+          --argjson attempt "$ACTUAL_ATTEMPT" \
+          '{pr_number: $pr_number, trigger_workflow: $trigger_workflow, trigger_result: $trigger_result, workflow_summary: $workflow_summary, attempt: $attempt}')
+
+        # Detect work_item_id: explicit input > PR title
+        WI_ID="$WORK_ITEM_ID"
+        if [ -z "$WI_ID" ]; then
+          PR_TITLE=$(gh pr view "$PR_NUMBER" --json title --jq .title 2>/dev/null || true)
+          WI_ID=$(echo "$PR_TITLE" | grep -oP '(?:AB#|VYZN-)(\d+)' | head -1 | grep -oP '\d+' || true)
+        fi
+        if [ -n "$WI_ID" ]; then
+          PAYLOAD=$(echo "$PAYLOAD" | jq --arg wi "$WI_ID" '. + {work_item_id: $wi}')
+          echo "Including work_item_id: $WI_ID"
+        fi
+
+        # Dispatch the resume event
+        DISPATCH_BODY=$(echo "$PAYLOAD" | jq '{event_type: "po-agent-resume", client_payload: .}')
+        echo "$DISPATCH_BODY" | gh api "repos/$GITHUB_REPOSITORY/dispatches" --input -

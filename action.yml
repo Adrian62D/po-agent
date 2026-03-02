@@ -46,6 +46,7 @@ runs:
         TRIGGER_WORD: ${{ inputs.trigger_word }}
       run: |
         EVENT=$(cat "$GITHUB_EVENT_PATH")
+        SOURCE_CTX="{}"
 
         case "$GITHUB_EVENT_NAME" in
           issue_comment)
@@ -57,6 +58,13 @@ runs:
             echo "pr_number=$(echo "$EVENT" | jq -r '.issue.number')" >> "$GITHUB_OUTPUT"
             echo "comment_id=$(echo "$EVENT" | jq -r '.comment.id')" >> "$GITHUB_OUTPUT"
             echo "comment_user=$(echo "$EVENT" | jq -r '.comment.user.login')" >> "$GITHUB_OUTPUT"
+            SOURCE_CTX=$(echo "$EVENT" | jq '{
+              source: "github",
+              message: (.comment.body // ""),
+              pr_number: (.issue.number | tostring),
+              comment_id: (.comment.id | tostring),
+              comment_user: (.comment.user.login // "")
+            }')
             ;;
           repository_dispatch)
             ACTION=$(echo "$EVENT" | jq -r '.action')
@@ -74,6 +82,7 @@ runs:
               echo "message=Resume: $(echo "$PAYLOAD" | jq -r '.trigger_workflow // "workflow"') completed ($(echo "$PAYLOAD" | jq -r '.trigger_result'))" >> "$GITHUB_OUTPUT"
               # Pass through any extra fields from payload as env vars
               echo "$PAYLOAD" | jq -r 'to_entries[] | select(.key | test("^(pr_number|trigger_workflow|trigger_result|attempt|workflow_summary)$") | not) | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT" 2>/dev/null || true
+              SOURCE_CTX=$(echo "$PAYLOAD" | jq '{source: "resume"} + .')
 
             # Check for Slack-like event (has text + channel_id)
             elif echo "$PAYLOAD" | jq -e '.text and .channel_id' > /dev/null 2>&1; then
@@ -86,36 +95,51 @@ runs:
               if echo "$PAYLOAD" | jq -e '.bot_id' > /dev/null 2>&1; then
                 echo "skip=true" >> "$GITHUB_OUTPUT"
               fi
-            # Check for Azure DevOps webhook (has work_item_id + comment_text)
-            elif echo "$PAYLOAD" | jq -e '.work_item_id and .comment_text' > /dev/null 2>&1; then
-              echo "source=azure-devops" >> "$GITHUB_OUTPUT"
-              echo "message=$(echo "$PAYLOAD" | jq -r '.comment_text')" >> "$GITHUB_OUTPUT"
-              echo "azdo_work_item_id=$(echo "$PAYLOAD" | jq -r '.work_item_id')" >> "$GITHUB_OUTPUT"
-              echo "azdo_comment_id=$(echo "$PAYLOAD" | jq -r '.comment_id // ""')" >> "$GITHUB_OUTPUT"
-              echo "azdo_work_item_title=$(echo "$PAYLOAD" | jq -r '.work_item_title // ""')" >> "$GITHUB_OUTPUT"
-              echo "azdo_comment_author=$(echo "$PAYLOAD" | jq -r '.comment_author // ""')" >> "$GITHUB_OUTPUT"
-              echo "azdo_project=$(echo "$PAYLOAD" | jq -r '.project // ""')" >> "$GITHUB_OUTPUT"
-              # Pass remaining payload fields
-              echo "$PAYLOAD" | jq -r 'to_entries[] | select(.key | test("^(work_item_id|comment_text|comment_id|work_item_title|comment_author|project)$") | not) | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT" 2>/dev/null || true
+              SOURCE_CTX=$(echo "$PAYLOAD" | jq '{source: "slack"} + .')
 
-            # Generic webhook event — extract message from common fields
-            else
-              echo "source=webhook" >> "$GITHUB_OUTPUT"
-              MSG=$(echo "$PAYLOAD" | jq -r '.message // .comment_text // .text // .body // "No message"')
-              echo "message=$MSG" >> "$GITHUB_OUTPUT"
+            # Generic webhook with structured payload — collect all fields
+            elif echo "$PAYLOAD" | jq -e 'type == "object"' > /dev/null 2>&1; then
+              # Auto-detect known source types from payload shape
+              if echo "$PAYLOAD" | jq -e '.work_item_id and .comment_text' > /dev/null 2>&1; then
+                echo "source=azure-devops" >> "$GITHUB_OUTPUT"
+                echo "message=$(echo "$PAYLOAD" | jq -r '.comment_text')" >> "$GITHUB_OUTPUT"
+                echo "azdo_work_item_id=$(echo "$PAYLOAD" | jq -r '.work_item_id')" >> "$GITHUB_OUTPUT"
+                echo "azdo_comment_id=$(echo "$PAYLOAD" | jq -r '.comment_id // ""')" >> "$GITHUB_OUTPUT"
+                echo "azdo_work_item_title=$(echo "$PAYLOAD" | jq -r '.work_item_title // ""')" >> "$GITHUB_OUTPUT"
+                echo "azdo_comment_author=$(echo "$PAYLOAD" | jq -r '.comment_author // ""')" >> "$GITHUB_OUTPUT"
+                echo "azdo_project=$(echo "$PAYLOAD" | jq -r '.project // ""')" >> "$GITHUB_OUTPUT"
+                SOURCE_CTX=$(echo "$PAYLOAD" | jq '{source: "azure-devops"} + .')
+              else
+                echo "source=webhook" >> "$GITHUB_OUTPUT"
+                MSG=$(echo "$PAYLOAD" | jq -r '.message // .comment_text // .text // .body // "No message"')
+                echo "message=$MSG" >> "$GITHUB_OUTPUT"
+                SOURCE_CTX=$(echo "$PAYLOAD" | jq '{source: "webhook"} + .')
+              fi
               # Pass all payload fields as outputs
               echo "$PAYLOAD" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT" 2>/dev/null || true
+            else
+              echo "source=webhook" >> "$GITHUB_OUTPUT"
+              MSG=$(echo "$PAYLOAD" | jq -r '.message // .comment_text // .text // .body // "No message"' 2>/dev/null || echo "No message")
+              echo "message=$MSG" >> "$GITHUB_OUTPUT"
+              SOURCE_CTX=$(jq -n --arg s "webhook" --arg m "$MSG" '{source: $s, message: $m}')
             fi
             ;;
           workflow_dispatch)
             echo "source=manual" >> "$GITHUB_OUTPUT"
             echo "message=$(echo "$EVENT" | jq -r '.inputs.message // "Hello"')" >> "$GITHUB_OUTPUT"
+            SOURCE_CTX=$(jq -n --arg m "$(echo "$EVENT" | jq -r '.inputs.message // "Hello"')" '{source: "manual", message: $m}')
             ;;
           *)
             echo "source=unknown" >> "$GITHUB_OUTPUT"
             echo "message=Triggered by $GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"
+            SOURCE_CTX=$(jq -n --arg s "unknown" --arg m "Triggered by $GITHUB_EVENT_NAME" '{source: $s, message: $m}')
             ;;
         esac
+
+        # Write source context JSON for source-adapter
+        echo "$SOURCE_CTX" > /tmp/source_context.json
+        echo "Source context written to /tmp/source_context.json"
+        cat /tmp/source_context.json | jq -r '.source' || true
 
     - name: Early exit for bot messages
       if: steps.source.outputs.skip == 'true'
@@ -124,96 +148,14 @@ runs:
         echo "::notice::Skipping — bot message detected (prevents infinite loops)"
         exit 0
 
-    # ── 2. Acknowledge receipt ──────────────────────────────────────────
-    - name: Acknowledge on GitHub
-      if: steps.source.outputs.source == 'github' && steps.source.outputs.skip != 'true'
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ inputs.github_token }}
-        script: |
-          await github.rest.reactions.createForIssueComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            comment_id: ${{ steps.source.outputs.comment_id }},
-            content: 'eyes'
-          });
-
-    # ── 2b. Acknowledge on Slack ─────────────────────────────────────────
-    - name: Acknowledge on Slack
-      if: steps.source.outputs.source == 'slack' && steps.source.outputs.skip != 'true'
+    # ── 2. Acknowledge receipt (via source-adapter) ──────────────────────
+    - name: Acknowledge receipt
+      if: steps.source.outputs.skip != 'true'
       shell: bash
       env:
-        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
-        SLACK_MESSAGE_TS: ${{ steps.source.outputs.slack_message_ts }}
+        GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        # SLACK_BOT_TOKEN must be provided via secrets input
-        if [ -z "$SLACK_BOT_TOKEN" ]; then
-          echo "::warning::No SLACK_BOT_TOKEN — cannot add Slack reaction"
-          exit 0
-        fi
-        if [ -n "$SLACK_MESSAGE_TS" ] && [ "$SLACK_MESSAGE_TS" != "null" ]; then
-          curl -s -X POST https://slack.com/api/reactions.add \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_MESSAGE_TS\",\"name\":\"thinking_face\"}" > /dev/null 2>&1 || true
-          echo "Added thinking_face reaction on Slack"
-        fi
-
-    # ── 2c. Acknowledge on Azure DevOps ──────────────────────────────────
-    - name: Acknowledge on Azure DevOps
-      if: steps.source.outputs.source == 'azure-devops' && steps.source.outputs.skip != 'true'
-      shell: bash
-      env:
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
-        AZDO_COMMENT_ID: ${{ steps.source.outputs.azdo_comment_id }}
-      run: |
-        # AZURE_DEVOPS_ORG, AZURE_DEVOPS_PROJECT, AZURE_DEVOPS_PAT must be provided via secrets
-        if [ -z "$AZURE_DEVOPS_PAT" ] || [ -z "$AZURE_DEVOPS_ORG" ]; then
-          echo "::warning::No AZURE_DEVOPS_PAT or ORG — cannot acknowledge on AzDo"
-          exit 0
-        fi
-
-        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
-        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-        WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-
-        # 1. React to the triggering comment
-        if [ -n "$AZDO_COMMENT_ID" ] && [ "$AZDO_COMMENT_ID" != "null" ]; then
-          curl -sf -X PUT \
-            "${AZDO_URL}/comments/${AZDO_COMMENT_ID}/reactions/like?api-version=7.1-preview.1" \
-            -H "Authorization: Basic $AUTH" \
-            -H "Content-Type: application/json" > /dev/null 2>&1 || true
-        fi
-
-        # 2. Post "Starting work..." comment
-        COMMENT_BODY="<p>🤖 <strong>Starting work...</strong></p><p>Follow progress: <a href=\"${WORKFLOW_URL}\">workflow run</a></p>"
-        curl -sf -X POST \
-          "${AZDO_URL}/comments?api-version=7.1-preview.4" \
-          -H "Authorization: Basic $AUTH" \
-          -H "Content-Type: application/json" \
-          -d "{\"text\": \"$COMMENT_BODY\"}" > /dev/null 2>&1 || echo "::warning::Failed to post AzDo comment"
-
-        # 3. Set po-agent:in-progress tag
-        CURRENT_TAGS=$(curl -sf \
-          "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-          -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
-
-        # Strip existing po-agent status tags
-        NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-          grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
-          tr '\n' ';' | sed 's/;$//')
-
-        # Add in-progress tag and attempt-1 if no attempt tag exists
-        NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:in-progress"
-        if ! echo "$NEW_TAGS" | grep -q 'po-agent:attempt-'; then
-          NEW_TAGS="${NEW_TAGS}; po-agent:attempt-1"
-        fi
-
-        curl -sf -X PATCH \
-          "${AZDO_URL}?api-version=7.0" \
-          -H "Authorization: Basic $AUTH" \
-          -H "Content-Type: application/json-patch+json" \
-          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
+        source-adapter acknowledge "$(cat /tmp/source_context.json)" || true
 
     # ── 3. Install Claude Code CLI ──────────────────────────────────────
     - name: Install Claude Code
@@ -316,12 +258,19 @@ runs:
 
         echo "=== Linking PO Agent skills ==="
 
-        # Link framework default skills (skip if consumer has override in .po-agent/skills/)
+        # Protected skills: ALWAYS use framework version, even if consumer has override
+        PROTECTED_SKILLS="ci-wait-resume budget-management"
+
+        # Link framework default skills (skip if consumer has override, unless protected)
         if [ -d "$ACTION_DIR/skills" ]; then
           for skill_dir in "$ACTION_DIR"/skills/*/; do
             [ ! -d "$skill_dir" ] && continue
             skill_name=$(basename "$skill_dir")
-            if [ -d "$WORKSPACE/.po-agent/skills/$skill_name" ]; then
+            if echo "$PROTECTED_SKILLS" | grep -qw "$skill_name"; then
+              # Protected: always use framework version
+              ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
+              echo "LINK (protected): $skill_name"
+            elif [ -d "$WORKSPACE/.po-agent/skills/$skill_name" ]; then
               echo "SKIP (override): $skill_name"
             else
               ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
@@ -330,13 +279,17 @@ runs:
           done
         fi
 
-        # Link consumer skills from .po-agent/skills/
+        # Link consumer skills from .po-agent/skills/ (skip protected skills)
         if [ -d "$WORKSPACE/.po-agent/skills" ]; then
           for skill_dir in "$WORKSPACE"/.po-agent/skills/*/; do
             [ ! -d "$skill_dir" ] && continue
             skill_name=$(basename "$skill_dir")
-            ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
-            echo "LINK (consumer):  $skill_name"
+            if echo "$PROTECTED_SKILLS" | grep -qw "$skill_name"; then
+              echo "SKIP (protected): $skill_name (consumer override blocked)"
+            else
+              ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
+              echo "LINK (consumer):  $skill_name"
+            fi
           done
         fi
 
@@ -345,6 +298,7 @@ runs:
         ls "$WORKSPACE/.claude/skills/" 2>/dev/null || echo "(none)"
 
         # Link scripts to PATH
+        # 1. Shell scripts: link directly
         if [ -d "$ACTION_DIR/scripts" ]; then
           for script in "$ACTION_DIR"/scripts/*.sh; do
             [ ! -f "$script" ] && continue
@@ -352,6 +306,60 @@ runs:
             name=$(basename "$script" .sh)
             sudo ln -sf "$script" "/usr/local/bin/$name"
             echo "SCRIPT: $name"
+          done
+        fi
+
+        # 2. TypeScript scripts: framework defaults get -default suffix, then consumer overrides
+        echo ""
+        echo "=== Linking TypeScript scripts ==="
+
+        # Install tsx globally for running .ts scripts
+        npm install -g tsx 2>/dev/null || true
+
+        # Helper: create a shell shim that calls tsx on a .ts file
+        create_ts_shim() {
+          local name="$1"
+          local ts_path="$2"
+          printf '#!/bin/bash\nexec tsx "%s" "$@"\n' "$ts_path" > "/tmp/shim-${name}"
+          chmod +x "/tmp/shim-${name}"
+          sudo mv "/tmp/shim-${name}" "/usr/local/bin/${name}"
+        }
+
+        # Link framework .ts scripts with -default suffix
+        if [ -d "$ACTION_DIR/scripts" ]; then
+          for script in "$ACTION_DIR"/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            create_ts_shim "${name}-default" "$script"
+            echo "SCRIPT (framework default): ${name}-default → $script"
+          done
+        fi
+
+        # Link consumer .ts overrides (or fall back to framework)
+        if [ -d "$ACTION_DIR/scripts" ]; then
+          for script in "$ACTION_DIR"/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            if [ -f "$WORKSPACE/.po-agent/scripts/${name}.ts" ]; then
+              create_ts_shim "$name" "$WORKSPACE/.po-agent/scripts/${name}.ts"
+              echo "SCRIPT (consumer override): $name → $WORKSPACE/.po-agent/scripts/${name}.ts"
+            else
+              create_ts_shim "$name" "$script"
+              echo "SCRIPT (framework): $name → $script"
+            fi
+          done
+        fi
+
+        # Also link any consumer-only .ts scripts not in framework
+        if [ -d "$WORKSPACE/.po-agent/scripts" ]; then
+          for script in "$WORKSPACE"/.po-agent/scripts/*.ts; do
+            [ ! -f "$script" ] && continue
+            name=$(basename "$script" .ts)
+            # Skip if already linked (framework had this name)
+            if [ ! -f "/usr/local/bin/$name" ]; then
+              create_ts_shim "$name" "$script"
+              echo "SCRIPT (consumer only): $name → $script"
+            fi
           done
         fi
 
@@ -371,7 +379,40 @@ runs:
           echo "Exported secrets to environment"
         fi
 
-    # ── 8. Fetch context ────────────────────────────────────────────────
+    # ── 7b. Set initial state via state-backend ───────────────────────────
+    - name: Set initial state
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        SOURCE: ${{ steps.source.outputs.source }}
+        PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        # Determine the entity to track state for
+        ENTITY_INPUT=""
+        case "$SOURCE" in
+          azure-devops)
+            ENTITY_INPUT="$AZDO_WORK_ITEM_ID"
+            ;;
+          github|resume)
+            ENTITY_INPUT="$PR_NUMBER"
+            ;;
+          *)
+            echo "Source '$SOURCE' — no state tracking"
+            exit 0
+            ;;
+        esac
+
+        if [ -z "$ENTITY_INPUT" ] || [ "$ENTITY_INPUT" = "null" ]; then
+          echo "No entity to track — skipping"
+          exit 0
+        fi
+
+        ENTITY=$(state-backend resolve-entity "$ENTITY_INPUT" 2>/dev/null || echo "$ENTITY_INPUT")
+        state-backend set-status "$ENTITY" in-progress || echo "::warning::Failed to set initial state"
+
+    # ── 8. Fetch context (via source-adapter) ────────────────────────────
     - name: Fetch context
       if: steps.source.outputs.skip != 'true'
       id: context
@@ -380,176 +421,19 @@ runs:
         SOURCE: ${{ steps.source.outputs.source }}
         PR_NUMBER: ${{ steps.source.outputs.pr_number }}
         GH_TOKEN: ${{ inputs.github_token }}
-        SLACK_BOT_TOKEN_ENV: ${{ steps.source.outputs.slack_bot_token }}
-        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
-        SLACK_THREAD_TS: ${{ steps.source.outputs.slack_thread_ts }}
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id }}
       run: |
         CONTEXT_FILE="/tmp/conversation_context.txt"
         touch "$CONTEXT_FILE"
 
-        # Helper: fetch AzDo work item context
-        fetch_azdo_work_item() {
-          local WI_ID="$1"
-          local PREFIX="${2:-}"
-          if [ -z "$AZURE_DEVOPS_PAT" ] || [ -z "$AZURE_DEVOPS_ORG" ] || [ -z "$WI_ID" ]; then
-            return
-          fi
+        # Delegate context fetching to source-adapter (may be consumer-overridden)
+        source-adapter fetch-context "$(cat /tmp/source_context.json)" > /tmp/raw_context.txt 2>/dev/null || true
 
-          local AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-          local AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$WI_ID"
+        # Framework guard: truncate to 50KB max, strip null bytes
+        tr -d '\0' < /tmp/raw_context.txt | head -c 51200 >> "$CONTEXT_FILE"
 
-          local WI=$(curl -sf "${AZDO_URL}?\$expand=relations&api-version=7.0" \
-            -H "Authorization: Basic $AUTH" 2>/dev/null || echo "{}")
-
-          if [ "$WI" = "{}" ]; then
-            echo "${PREFIX}(Could not fetch work item #$WI_ID)" >> "$CONTEXT_FILE"
-            return
-          fi
-
-          local WI_TYPE=$(echo "$WI" | jq -r '.fields["System.WorkItemType"] // "Unknown"')
-          local WI_TITLE=$(echo "$WI" | jq -r '.fields["System.Title"] // "N/A"')
-          local WI_STATE=$(echo "$WI" | jq -r '.fields["System.State"] // "N/A"')
-          local WI_ASSIGNED=$(echo "$WI" | jq -r '.fields["System.AssignedTo"].displayName // "Unassigned"')
-          local WI_DESC=$(echo "$WI" | jq -r '.fields["System.Description"] // ""' | head -c 3000)
-          local WI_REPRO=$(echo "$WI" | jq -r '.fields["Microsoft.VSTS.TCM.ReproSteps"] // ""' | head -c 2000)
-          local WI_AC=$(echo "$WI" | jq -r '.fields["Microsoft.VSTS.Common.AcceptanceCriteria"] // ""' | head -c 2000)
-          local WI_TENANT=$(echo "$WI" | jq -r '.fields["Custom.Tenant"] // ""')
-          local WI_URL_FIELD=$(echo "$WI" | jq -r '.fields["Custom.URL"] // ""')
-
-          echo "${PREFIX}=== Azure DevOps Work Item #$WI_ID ===" >> "$CONTEXT_FILE"
-          echo "${PREFIX}**Type:** $WI_TYPE | **Title:** $WI_TITLE" >> "$CONTEXT_FILE"
-          echo "${PREFIX}**State:** $WI_STATE | **Assigned:** $WI_ASSIGNED" >> "$CONTEXT_FILE"
-          [ -n "$WI_TENANT" ] && echo "${PREFIX}**Tenant:** $WI_TENANT" >> "$CONTEXT_FILE"
-          [ -n "$WI_URL_FIELD" ] && echo "${PREFIX}**URL:** $WI_URL_FIELD" >> "$CONTEXT_FILE"
-          echo "" >> "$CONTEXT_FILE"
-
-          if [ -n "$WI_DESC" ]; then
-            echo "${PREFIX}**Description:**" >> "$CONTEXT_FILE"
-            echo "$WI_DESC" | sed 's/<[^>]*>//g' >> "$CONTEXT_FILE"
-            echo "" >> "$CONTEXT_FILE"
-          fi
-          if [ "$WI_TYPE" = "Bug" ] && [ -n "$WI_REPRO" ]; then
-            echo "${PREFIX}**Repro Steps:**" >> "$CONTEXT_FILE"
-            echo "$WI_REPRO" | sed 's/<[^>]*>//g' >> "$CONTEXT_FILE"
-            echo "" >> "$CONTEXT_FILE"
-          fi
-          if [ -n "$WI_AC" ]; then
-            echo "${PREFIX}**Acceptance Criteria:**" >> "$CONTEXT_FILE"
-            echo "$WI_AC" | sed 's/<[^>]*>//g' >> "$CONTEXT_FILE"
-            echo "" >> "$CONTEXT_FILE"
-          fi
-
-          # Fetch recent comments (last 15)
-          local COMMENTS=$(curl -sf \
-            "${AZDO_URL}/comments?api-version=7.1-preview.4&\$top=15&order=desc" \
-            -H "Authorization: Basic $AUTH" 2>/dev/null || echo '{"comments":[]}')
-
-          local COMMENT_COUNT=$(echo "$COMMENTS" | jq '.comments | length')
-          if [ "$COMMENT_COUNT" -gt 0 ]; then
-            echo "${PREFIX}**Recent Comments:**" >> "$CONTEXT_FILE"
-            echo "$COMMENTS" | jq -r '.comments | reverse | .[] | "- " + (.createdBy.displayName // "unknown") + ": " + (.text | gsub("<[^>]*>"; "") | split("\n")[0] // "")' 2>/dev/null | tail -15 >> "$CONTEXT_FILE"
-            echo "" >> "$CONTEXT_FILE"
-          fi
-
-          # Check for attachments
-          local ATTACHMENTS=$(echo "$WI" | jq -r '.relations // [] | map(select(.rel == "AttachedFile")) | .[]? | .url' 2>/dev/null)
-          if [ -n "$ATTACHMENTS" ]; then
-            echo "${PREFIX}**Attachments:** (use \`/azure-attachments\` CLI to view — NEVER raw curl)" >> "$CONTEXT_FILE"
-            echo "$ATTACHMENTS" | while read -r url; do
-              local FNAME=$(echo "$url" | grep -oP '[^/]+$' | sed 's/%20/ /g')
-              echo "  - $FNAME" >> "$CONTEXT_FILE"
-            done
-            echo "" >> "$CONTEXT_FILE"
-          fi
-        }
-
-        # Helper: detect linked work item ID from text
-        detect_work_item_id() {
-          echo "$1" | grep -oP '(?:AB#|VYZN-|_workitems/edit/)(\d+)' | head -1 | grep -oP '\d+'
-        }
-
-        case "$SOURCE" in
-          azure-devops)
-            fetch_azdo_work_item "$AZDO_WORK_ITEM_ID"
-            ;;
-
-          github|resume)
-            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-              echo "=== Pull Request #$PR_NUMBER ===" > "$CONTEXT_FILE"
-              PR_DATA=$(gh pr view "$PR_NUMBER" --json title,body,headRefName,baseRefName,files,comments 2>/dev/null || echo "{}")
-              if [ "$PR_DATA" != "{}" ]; then
-                echo "**Title:** $(echo "$PR_DATA" | jq -r '.title // "N/A"')" >> "$CONTEXT_FILE"
-                echo "**Branch:** $(echo "$PR_DATA" | jq -r '.headRefName // "?"') → $(echo "$PR_DATA" | jq -r '.baseRefName // "?"')" >> "$CONTEXT_FILE"
-                echo "" >> "$CONTEXT_FILE"
-                echo "**Description:**" >> "$CONTEXT_FILE"
-                echo "$PR_DATA" | jq -r '.body // "No description"' >> "$CONTEXT_FILE"
-                echo "" >> "$CONTEXT_FILE"
-                echo "**Changed Files:**" >> "$CONTEXT_FILE"
-                echo "$PR_DATA" | jq -r '.files[].path' 2>/dev/null | head -20 >> "$CONTEXT_FILE"
-                echo "" >> "$CONTEXT_FILE"
-                echo "**Recent Comments:**" >> "$CONTEXT_FILE"
-                echo "$PR_DATA" | jq -r '.comments[-5:]? // [] | .[]? | "- \(.author.login // "unknown"): \(.body | split("\n")[0] // "")"' >> "$CONTEXT_FILE" 2>/dev/null || true
-
-                # Check for linked AzDo work item from PR title, body, branch name
-                PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
-                PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
-                PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // ""')
-                LINKED_WI=$(detect_work_item_id "$PR_TITLE $PR_BODY $PR_BRANCH")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
-                fi
-              fi
-            fi
-            ;;
-          slack)
-            # Fetch thread history if Slack bot token is available
-            if [ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_THREAD_TS" ]; then
-              RESPONSE=$(curl -s "https://slack.com/api/conversations.replies" \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                -G \
-                --data-urlencode "channel=$SLACK_CHANNEL" \
-                --data-urlencode "ts=$SLACK_THREAD_TS" \
-                --data-urlencode "limit=20" 2>/dev/null)
-
-              if echo "$RESPONSE" | jq -e '.ok == true' > /dev/null 2>&1; then
-                echo "=== Slack Thread History ===" > "$CONTEXT_FILE"
-                echo "$RESPONSE" | jq -r '
-                  .messages |
-                  to_entries |
-                  map(
-                    if .value.bot_id then "Assistant: " + .value.text
-                    else "User: " + .value.text end
-                  ) | join("\n\n")
-                ' >> "$CONTEXT_FILE"
-
-                # Check for linked AzDo work item from thread text
-                THREAD_TEXT=$(echo "$RESPONSE" | jq -r '.messages[].text' 2>/dev/null | tr '\n' ' ')
-                LINKED_WI=$(detect_work_item_id "$THREAD_TEXT")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
-                fi
-              fi
-            fi
-            ;;
-        esac
-
-        # Add resume context
-        if [ "$SOURCE" == "resume" ]; then
-          echo "" >> "$CONTEXT_FILE"
-          echo "=== RESUME CONTEXT ===" >> "$CONTEXT_FILE"
-          echo "You are **resuming** work on PR #$PR_NUMBER." >> "$CONTEXT_FILE"
-          echo "Trigger: ${{ steps.source.outputs.resume_trigger }} — Result: **${{ steps.source.outputs.resume_result }}**" >> "$CONTEXT_FILE"
-          SUMMARY="${{ steps.source.outputs.resume_workflow_summary }}"
-          [ -n "$SUMMARY" ] && echo "Workflow results: $SUMMARY" >> "$CONTEXT_FILE"
-          echo "Attempt ${{ steps.source.outputs.resume_attempt }}." >> "$CONTEXT_FILE"
-          echo "=== END RESUME CONTEXT ===" >> "$CONTEXT_FILE"
+        CONTEXT_SIZE=$(wc -c < "$CONTEXT_FILE" | tr -d ' ')
+        if [ "$CONTEXT_SIZE" -gt 51200 ]; then
+          echo "::warning::Context truncated from ${CONTEXT_SIZE} to 51200 bytes"
         fi
 
         if [ -s "$CONTEXT_FILE" ]; then
@@ -714,13 +598,11 @@ runs:
         if-no-files-found: ignore
         retention-days: 7
 
-    # ── 11b. Catalog artifacts and embed references in response ────────
+    # ── 11b. Embed artifact references in response (via source-adapter) ─
     - name: Embed artifact references in response
       if: always() && steps.source.outputs.skip != 'true'
       id: embed-artifacts
       shell: bash
-      env:
-        SOURCE: ${{ steps.source.outputs.source }}
       run: |
         ACTION_DIR="${{ github.action_path }}"
 
@@ -736,237 +618,103 @@ runs:
         fi
 
         ARTIFACT_COUNT=$(jq '.artifacts | length' "$MANIFEST")
-        echo "Embedding $ARTIFACT_COUNT artifact(s) for source: $SOURCE"
+        echo "Embedding $ARTIFACT_COUNT artifact(s)"
 
-        ARTIFACT_BLOCK=""
-        RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-        ARTIFACT_DL_URL="$RUN_URL#artifacts"
-
-        case "$SOURCE" in
-          github|resume)
-            # For GitHub: embed images inline, link videos
-            ARTIFACT_BLOCK=$'\n\n---\n📎 **Artifacts**\n'
-            while IFS= read -r artifact; do
-              FILENAME=$(echo "$artifact" | jq -r '.filename')
-              TYPE=$(echo "$artifact" | jq -r '.type')
-              case "$TYPE" in
-                image)
-                  # GitHub PR comments don't support direct artifact images,
-                  # but we can reference them in the artifacts download
-                  ARTIFACT_BLOCK+=$'\n'"- 🖼️ \`$FILENAME\` — [download from artifacts]($ARTIFACT_DL_URL)"
-                  ;;
-                video)
-                  ARTIFACT_BLOCK+=$'\n'"- 🎬 \`$FILENAME\` — [download from artifacts]($ARTIFACT_DL_URL)"
-                  ;;
-                *)
-                  ARTIFACT_BLOCK+=$'\n'"- 📄 \`$FILENAME\` — [download from artifacts]($ARTIFACT_DL_URL)"
-                  ;;
-              esac
-            done < <(jq -c '.artifacts[]' "$MANIFEST")
-            ;;
-          slack)
-            # For Slack: add file links
-            ARTIFACT_BLOCK=$'\n\n📎 *Artifacts*\n'
-            while IFS= read -r artifact; do
-              FILENAME=$(echo "$artifact" | jq -r '.filename')
-              TYPE=$(echo "$artifact" | jq -r '.type')
-              ARTIFACT_BLOCK+="• \`$FILENAME\` ($TYPE) — <$ARTIFACT_DL_URL|download>"$'\n'
-            done < <(jq -c '.artifacts[]' "$MANIFEST")
-            ;;
-          azure-devops)
-            # For AzDo: HTML formatted artifact list
-            ARTIFACT_BLOCK=$'\n\n---\n📎 **Artifacts**\n'
-            while IFS= read -r artifact; do
-              FILENAME=$(echo "$artifact" | jq -r '.filename')
-              TYPE=$(echo "$artifact" | jq -r '.type')
-              ARTIFACT_BLOCK+=$'\n'"- \`$FILENAME\` ($TYPE) — [download from artifacts]($ARTIFACT_DL_URL)"
-            done < <(jq -c '.artifacts[]' "$MANIFEST")
-            ;;
-        esac
+        # Delegate artifact formatting to source-adapter
+        ARTIFACT_BLOCK=$(source-adapter format-artifacts "$(cat /tmp/source_context.json)" "$MANIFEST" 2>/dev/null || true)
 
         if [ -n "$ARTIFACT_BLOCK" ] && [ -f /tmp/agent_output.txt ]; then
           echo "$ARTIFACT_BLOCK" >> /tmp/agent_output.txt
           echo "Artifact references appended to response"
         fi
 
-    # ── 12. Post response ───────────────────────────────────────────────
-    - name: Post response to GitHub PR
-      if: always() && (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'resume') && steps.source.outputs.skip != 'true'
-      uses: actions/github-script@v7
-      env:
-        COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
-      with:
-        github-token: ${{ inputs.github_token }}
-        script: |
-          const fs = require('fs');
-          let response = '';
-          try {
-            response = fs.readFileSync('/tmp/agent_output.txt', 'utf8').slice(-10000);
-          } catch (e) {
-            response = 'The agent did not produce output. Check workflow logs.';
-          }
+    # ── 12. Detect response status (framework-only, non-overridable) ────
+    - name: Detect response status
+      if: always() && steps.source.outputs.skip != 'true'
+      id: detect-status
+      shell: bash
+      run: |
+        # Framework-only status detection — uses detect-status.sh (not .ts),
+        # so consumers CANNOT override this via the .po-agent/scripts/ mechanism
+        STATUS=$(detect-status /tmp/agent_output.txt 2>/dev/null || echo "done")
 
-          const costUsd = process.env.COST_USD;
-          const costLine = costUsd && costUsd !== '0' ? `\n_LLM Cost: ~${costUsd} USD_` : '';
-          const source = '${{ steps.source.outputs.source }}';
-          const prNumber = parseInt('${{ steps.source.outputs.pr_number }}');
+        # Validate status is a well-formed value (lowercase, hyphens, no empty/garbage)
+        if ! echo "$STATUS" | grep -qE '^[a-z][a-z0-9-]*[a-z0-9]$'; then
+          echo "::warning::Invalid status '$STATUS' from detect-status — falling back to 'done'"
+          STATUS="done"
+        fi
 
-          if (!prNumber || isNaN(prNumber)) {
-            console.log('No PR number — skipping comment');
-            return;
-          }
+        echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+        echo "Detected status: $STATUS"
 
-          // Add completion reaction to original comment
-          const commentId = parseInt('${{ steps.source.outputs.comment_id }}');
-          if (commentId && !isNaN(commentId) && source === 'github') {
-            await github.rest.reactions.createForIssueComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: commentId,
-              content: 'rocket'
-            }).catch(() => {});
-          }
-
-          const commentUser = '${{ steps.source.outputs.comment_user }}';
-          const mention = commentUser ? `@${commentUser}\n\n` : '';
-          const resumeLabel = source === 'resume'
-            ? `## 🔄 Resume (Attempt ${{ steps.source.outputs.resume_attempt }})\n\n`
-            : '';
-
-          await github.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: prNumber,
-            body: `${resumeLabel}${mention}${response}\n\n---\n*🤖 [workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*${costLine}`
-          });
-
-    - name: Post response to Slack
-      if: always() && steps.source.outputs.source == 'slack' && steps.source.outputs.skip != 'true'
+    # ── 13. Post response (via source-adapter — posting only) ──────────
+    - name: Post response
+      if: always() && steps.source.outputs.skip != 'true'
       shell: bash
       env:
         COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
-        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
-        SLACK_THREAD_TS: ${{ steps.source.outputs.slack_message_ts }}
+        GH_TOKEN: ${{ inputs.github_token }}
       run: |
-        # SLACK_BOT_TOKEN must be provided via secrets input
-        if [ -z "$SLACK_BOT_TOKEN" ]; then
-          echo "::warning::No SLACK_BOT_TOKEN — cannot post to Slack"
-          exit 0
+        WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+        # Source-adapter only posts — no status detection, no state management
+        source-adapter post-response \
+          "$(cat /tmp/source_context.json)" \
+          /tmp/agent_output.txt \
+          "${COST_USD:-0}" \
+          "$WORKFLOW_URL" 2>/dev/null
+
+        POST_EXIT=$?
+        if [ $POST_EXIT -ne 0 ]; then
+          echo "::warning::source-adapter post-response failed (exit $POST_EXIT)"
+          # Fallback: post to GitHub PR if we have a PR number
+          PR_NUMBER="${{ steps.source.outputs.pr_number }}"
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            RESPONSE=$(head -c 10000 /tmp/agent_output.txt 2>/dev/null || echo "No output")
+            printf '%s\n\n%s\n\n---\n%s' \
+              ":warning: *Source adapter failed -- fallback response:*" \
+              "$RESPONSE" \
+              ":robot: [workflow run]($WORKFLOW_URL)" > /tmp/fallback-comment.md
+            gh pr comment "$PR_NUMBER" --body-file /tmp/fallback-comment.md || echo "::error::Fallback posting also failed"
+          fi
         fi
 
-        RESPONSE=$(cat /tmp/agent_output.txt 2>/dev/null | tail -c 3000 || echo "No output")
-
-        if [ -n "$COST_USD" ] && [ "$COST_USD" != "0" ]; then
-          RESPONSE=$(printf "%s\n\n---\n_LLM Cost: ~%s USD_" "$RESPONSE" "$COST_USD")
-        fi
-
-        RESPONSE_ESCAPED=$(printf '%s' "$RESPONSE" | jq -Rs .)
-
-        curl -s -X POST https://slack.com/api/chat.postMessage \
-          -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-          -H "Content-Type: application/json" \
-          -d "{
-            \"channel\": \"$SLACK_CHANNEL\",
-            \"thread_ts\": \"$SLACK_THREAD_TS\",
-            \"text\": $RESPONSE_ESCAPED
-          }" | jq .ok
-
-        # Update reactions
-        if [ -n "$SLACK_THREAD_TS" ]; then
-          curl -s -X POST https://slack.com/api/reactions.remove \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_THREAD_TS\",\"name\":\"thinking_face\"}" > /dev/null 2>&1
-          curl -s -X POST https://slack.com/api/reactions.add \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_THREAD_TS\",\"name\":\"white_check_mark\"}" > /dev/null 2>&1
-        fi
-
-    - name: Post response to Azure DevOps
-      if: always() && (steps.source.outputs.source == 'azure-devops' || steps.source.outputs.work_item_id != '' || steps.context.outputs.azdo_work_item_id != '') && steps.source.outputs.skip != 'true'
+    # ── 14. Update state (framework-controlled) ──────────────────────────
+    - name: Update state from detected status
+      if: always() && steps.source.outputs.skip != 'true'
       shell: bash
       env:
         SOURCE: ${{ steps.source.outputs.source }}
-        COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
-        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id || steps.context.outputs.azdo_work_item_id }}
-        RESUME_ATTEMPT: ${{ steps.source.outputs.resume_attempt }}
+        PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+        DETECTED_STATUS: ${{ steps.detect-status.outputs.status }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id }}
       run: |
-        if [ -z "$AZURE_DEVOPS_PAT" ] || [ -z "$AZURE_DEVOPS_ORG" ] || [ -z "$AZDO_WORK_ITEM_ID" ]; then
-          echo "No AzDo credentials or work item ID — skipping"
+        # Framework owns ALL state transitions — adapters are I/O only
+        ENTITY_INPUT=""
+        case "$SOURCE" in
+          azure-devops)
+            ENTITY_INPUT="$AZDO_WORK_ITEM_ID"
+            ;;
+          github|resume)
+            ENTITY_INPUT="$PR_NUMBER"
+            ;;
+          *)
+            echo "Source '$SOURCE' — no state tracking"
+            exit 0
+            ;;
+        esac
+
+        if [ -z "$ENTITY_INPUT" ] || [ "$ENTITY_INPUT" = "null" ]; then
+          echo "No entity to track — skipping state update"
           exit 0
         fi
 
-        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
-        WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        ENTITY=$(state-backend resolve-entity "$ENTITY_INPUT" 2>/dev/null || echo "$ENTITY_INPUT")
+        state-backend set-status "$ENTITY" "$DETECTED_STATUS" || echo "::warning::Failed to update state"
+        echo "State updated: $ENTITY -> $DETECTED_STATUS"
 
-        # Read response
-        RESPONSE=""
-        if [ -f /tmp/agent_output.txt ]; then
-          RESPONSE=$(head -c 50000 /tmp/agent_output.txt 2>/dev/null || true)
-        fi
-        [ -z "$RESPONSE" ] && RESPONSE="Sorry, I was unable to complete the task. Please check the [workflow logs]($WORKFLOW_URL)."
-
-        # Append footer
-        FOOTER="🤖 [workflow run]($WORKFLOW_URL)"
-        [ -n "$COST_USD" ] && [ "$COST_USD" != "0" ] && FOOTER="$FOOTER | _LLM Cost: ~$COST_USD USD_"
-        RESPONSE=$(printf "%s\n\n---\n%s" "$RESPONSE" "$FOOTER")
-
-        # Add resume header if applicable
-        if [ "$SOURCE" = "resume" ] && [ -n "$RESUME_ATTEMPT" ]; then
-          RESPONSE=$(printf "## 🔄 Resume (Attempt %s)\n\n%s" "$RESUME_ATTEMPT" "$RESPONSE")
-        fi
-
-        # Convert markdown → HTML
-        RESPONSE_HTML=""
-        if command -v npx &>/dev/null; then
-          RESPONSE_HTML=$(printf '%s' "$RESPONSE" | npx --yes marked@latest --gfm --breaks 2>/dev/null || true)
-        fi
-        if [ -z "$RESPONSE_HTML" ]; then
-          # Fallback: basic HTML escaping
-          RESPONSE_HTML=$(printf '%s' "$RESPONSE" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/$/\<br\>/g')
-        fi
-
-        # Post comment to work item
-        COMMENT_JSON=$(jq -n --arg text "$RESPONSE_HTML" '{text: $text}')
-        curl -sf --http1.1 -X POST \
-          "${AZDO_URL}/comments?api-version=7.1-preview.4" \
-          -H "Authorization: Basic $AUTH" \
-          -H "Content-Type: application/json" \
-          -d "$COMMENT_JSON" > /dev/null 2>&1 || echo "::warning::Failed to post response to AzDo"
-
-        # Detect status from response and update tags
-        WAITING_TOKEN='<!-- WAITING_FOR_HUMAN -->'
-        if echo "$RESPONSE" | grep -q "$WAITING_TOKEN"; then
-          NEW_STATUS="waiting-human"
-        elif echo "$RESPONSE" | grep -qiE "Created pull request|pushed|PR #[0-9]+|git push|the push was|body .?pr preview"; then
-          NEW_STATUS="waiting-ci"
-        elif [ -z "$RESPONSE" ] || [ ${#RESPONSE} -lt 10 ]; then
-          NEW_STATUS="failed"
-        else
-          NEW_STATUS="done"
-        fi
-
-        # Update tags on work item
-        CURRENT_TAGS=$(curl -sf \
-          "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-          -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
-
-        NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-          grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
-          tr '\n' ';' | sed 's/;$//')
-        NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:$NEW_STATUS"
-
-        curl -sf -X PATCH \
-          "${AZDO_URL}?api-version=7.0" \
-          -H "Authorization: Basic $AUTH" \
-          -H "Content-Type: application/json-patch+json" \
-          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
-
-        echo "AzDo response posted, status: $NEW_STATUS"
-
-    # ── 13. Job Summary ──────────────────────────────────────────────────
+    # ── 15. Job Summary ──────────────────────────────────────────────────
     - name: Write job summary
       if: always() && steps.source.outputs.skip != 'true'
       shell: bash
@@ -996,15 +744,13 @@ runs:
         \`\`\`
         SUMMARY_EOF
 
-    # ── 14. Cancellation handling ────────────────────────────────────────
+    # ── 16. Cancellation handling (via source-adapter) ────────────────────
     - name: Handle cancellation
       if: cancelled()
       shell: bash
       env:
         SOURCE: ${{ steps.source.outputs.source }}
         PR_NUMBER: ${{ steps.source.outputs.pr_number }}
-        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
-        SLACK_MESSAGE_TS: ${{ steps.source.outputs.slack_message_ts }}
         GH_TOKEN: ${{ inputs.github_token }}
         AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id || steps.context.outputs.azdo_work_item_id }}
       run: |
@@ -1032,53 +778,28 @@ runs:
         | **Partial output** | $(echo "$PARTIAL" | head -c 200 || echo "None") |
         CANCEL_EOF
 
-        # Post cancellation notice to source
-        case "$SOURCE" in
-          github|resume)
-            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-              gh pr comment "$PR_NUMBER" --body "$CANCEL_MSG"$'\n\n'"---"$'\n'"*🤖 [cancelled run](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)*" || true
-            fi
-            ;;
-          slack)
-            if [ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_MESSAGE_TS" ]; then
-              ESCAPED=$(printf '%s' "$CANCEL_MSG" | jq -Rs .)
-              curl -s -X POST https://slack.com/api/chat.postMessage \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"channel\":\"$SLACK_CHANNEL\",\"thread_ts\":\"$SLACK_MESSAGE_TS\",\"text\":$ESCAPED}" > /dev/null 2>&1 || true
-              # Remove thinking_face on cancel too
-              curl -s -X POST https://slack.com/api/reactions.remove \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_MESSAGE_TS\",\"name\":\"thinking_face\"}" > /dev/null 2>&1 || true
-              curl -s -X POST https://slack.com/api/reactions.add \
-                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                -H "Content-Type: application/json" \
-                -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_MESSAGE_TS\",\"name\":\"no_entry_sign\"}" > /dev/null 2>&1 || true
-            fi
-            ;;
-          azure-devops)
-            if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ] && [ -n "$AZDO_WORK_ITEM_ID" ]; then
-              AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-              AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
-              CANCEL_HTML="<p>⚠️ <strong>PO Agent run was cancelled.</strong></p><p><a href=\"https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\">workflow run</a></p>"
-              curl -sf --http1.1 -X POST \
-                "${AZDO_URL}/comments?api-version=7.1-preview.4" \
-                -H "Authorization: Basic $AUTH" \
-                -H "Content-Type: application/json" \
-                -d "{\"text\": \"$CANCEL_HTML\"}" > /dev/null 2>&1 || true
+        WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
-              # Set failed tag
-              CURRENT_TAGS=$(curl -sf "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-                -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
-              NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-                grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
-                tr '\n' ';' | sed 's/;$//')
-              NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:failed"
-              curl -sf -X PATCH "${AZDO_URL}?api-version=7.0" \
-                -H "Authorization: Basic $AUTH" \
-                -H "Content-Type: application/json-patch+json" \
-                -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || true
-            fi
+        # Delegate cancellation posting to source-adapter (posting only)
+        source-adapter post-cancel \
+          "$(cat /tmp/source_context.json)" \
+          "$CANCEL_MSG" \
+          "$WORKFLOW_URL" || true
+
+        # Framework guarantee: cancellation ALWAYS reaches failed state
+        # This runs for ALL sources, not just github/resume
+        ENTITY_INPUT=""
+        case "$SOURCE" in
+          azure-devops)
+            ENTITY_INPUT="$AZDO_WORK_ITEM_ID"
+            ;;
+          github|resume)
+            ENTITY_INPUT="$PR_NUMBER"
             ;;
         esac
+
+        if [ -n "$ENTITY_INPUT" ] && [ "$ENTITY_INPUT" != "null" ]; then
+          ENTITY=$(state-backend resolve-entity "$ENTITY_INPUT" 2>/dev/null || echo "$ENTITY_INPUT")
+          state-backend set-status "$ENTITY" failed || true
+          echo "Cancellation state: $ENTITY -> failed"
+        fi
