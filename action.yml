@@ -204,20 +204,15 @@ runs:
 
         # 2. Post "Starting work..." comment
         COMMENT_BODY="<p>🤖 <strong>Starting work...</strong></p><p>Follow progress: <a href=\"${WORKFLOW_URL}\">workflow run</a></p>"
-        echo "::warning::DEBUG AUTH_B64=[${AUTH}]"
-        echo "::warning::DEBUG AUTH_LEN=$(echo -n "$AUTH" | wc -c | tr -d ' ')"
-        echo "::warning::DEBUG AUTH_CHARS=$(echo -n "$AUTH" | xxd -p | tail -c 20)"
+        COMMENT_JSON=$(jq -n --arg text "$COMMENT_BODY" '{text: $text}')
         HTTP_CODE=$(curl -s --http1.1 -o /tmp/azdo_resp.txt -w "%{http_code}" -X POST \
           "${AZDO_URL}/comments?api-version=7.1-preview.4" \
           -H "Authorization: Basic ${AUTH}" \
           -H "Content-Type: application/json" \
-          -d "{\"text\": \"$COMMENT_BODY\"}" 2>/tmp/azdo_err.txt)
-        echo "::warning::DEBUG HTTP_CODE=${HTTP_CODE}"
-        echo "::warning::DEBUG RESP=$(cat /tmp/azdo_resp.txt 2>/dev/null | head -c 300)"
+          -d "$COMMENT_JSON" 2>/tmp/azdo_err.txt)
         if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
           echo "::warning::Failed to post AzDo comment (HTTP $HTTP_CODE)"
-        else
-          echo "::notice::Successfully posted AzDo comment (HTTP $HTTP_CODE)"
+          echo "::warning::response: $(cat /tmp/azdo_resp.txt 2>/dev/null | head -c 300)"
         fi
 
         # 3. Set po-agent:in-progress tag
@@ -236,11 +231,12 @@ runs:
           NEW_TAGS="${NEW_TAGS}; po-agent:attempt-1"
         fi
 
+        TAGS_JSON=$(jq -n --arg tags "$NEW_TAGS" '[{op: "replace", path: "/fields/System.Tags", value: $tags}]')
         curl -sf -X PATCH \
           "${AZDO_URL}?api-version=7.0" \
           -H "Authorization: Basic $AUTH" \
           -H "Content-Type: application/json-patch+json" \
-          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
+          -d "$TAGS_JSON" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
 
     # ── 3. Install Claude Code CLI ──────────────────────────────────────
     - name: Install Claude Code
@@ -971,11 +967,12 @@ runs:
           tr '\n' ';' | sed 's/;$//')
         NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:$NEW_STATUS"
 
+        TAGS_JSON=$(jq -n --arg tags "$NEW_TAGS" '[{op: "replace", path: "/fields/System.Tags", value: $tags}]')
         curl -sf -X PATCH \
           "${AZDO_URL}?api-version=7.0" \
           -H "Authorization: Basic $AUTH" \
           -H "Content-Type: application/json-patch+json" \
-          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
+          -d "$TAGS_JSON" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
 
         echo "AzDo response posted, status: $NEW_STATUS"
 
@@ -1076,11 +1073,12 @@ runs:
               AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
               AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
               CANCEL_HTML="<p>⚠️ <strong>PO Agent run was cancelled.</strong></p><p><a href=\"https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\">workflow run</a></p>"
+              CANCEL_JSON=$(jq -n --arg text "$CANCEL_HTML" '{text: $text}')
               curl -sf --http1.1 -X POST \
                 "${AZDO_URL}/comments?api-version=7.1-preview.4" \
                 -H "Authorization: Basic $AUTH" \
                 -H "Content-Type: application/json" \
-                -d "{\"text\": \"$CANCEL_HTML\"}" > /dev/null 2>&1 || true
+                -d "$CANCEL_JSON" > /dev/null 2>&1 || true
 
               # Set failed tag
               CURRENT_TAGS=$(curl -sf "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
@@ -1089,10 +1087,11 @@ runs:
                 { grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' || true; } | \
                 tr '\n' ';' | sed 's/;$//')
               NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:failed"
+              TAGS_JSON=$(jq -n --arg tags "$NEW_TAGS" '[{op: "replace", path: "/fields/System.Tags", value: $tags}]')
               curl -sf -X PATCH "${AZDO_URL}?api-version=7.0" \
                 -H "Authorization: Basic $AUTH" \
                 -H "Content-Type: application/json-patch+json" \
-                -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || true
+                -d "$TAGS_JSON" > /dev/null 2>&1 || true
             fi
             ;;
         esac
