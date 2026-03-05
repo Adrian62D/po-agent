@@ -52,6 +52,27 @@ Let's build, build, build.
 
 ---
 
+## Try It with Claude Code
+
+Open Claude Code and paste one of these prompts:
+
+**I already have a repo:**
+
+```
+Install PO Agent on my repo <your-repo-url>, then open an issue:
+"@po-agent add a /health endpoint that returns the app version from package.json, with a test"
+```
+
+**Start from scratch:**
+
+```
+Set up PO Agent on a new repo with a React + Vite starter. Once it's running,
+comment on an issue: "@po-agent add dark mode support using CSS custom properties.
+Include a toggle button in the header."
+```
+
+---
+
 ## Quick Start
 
 ### 1. Add the workflow
