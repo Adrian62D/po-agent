@@ -8,6 +8,32 @@ Customize everything with markdown files in `.po-agent/skills/`. No config schem
 
 ---
 
+## Why I Built This
+
+My motivation is simple: **enable every organisation to have a 24/7 dev factory.** Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder, a small team, or a large enterprise — PO Agent gives you an autonomous developer that investigates, implements, tests, and delivers around the clock.
+
+Let's build, build, build.
+
+---
+
+## Principles
+
+**Think first, code second.** The agent doesn't jump straight to implementation. It investigates the problem, assesses confidence, and confirms scope before writing a single line. Mandatory gates enforce this discipline — every time.
+
+**Skills over configuration.** No YAML schemas, no DSLs, no plugin APIs. Skills are plain markdown files that describe workflows in human language. If you can write a README, you can teach the agent a new workflow.
+
+**Your repo, your rules.** Override any built-in skill by dropping a markdown file in `.po-agent/skills/`. The agent adapts to your stack, your conventions, your quality bar. Framework defaults are just sensible starting points.
+
+**Transparent by default.** Every run posts its reasoning, cost, and a link to the workflow log. No black boxes. You see exactly what the agent did, why it did it, and what it cost.
+
+**Runs where your code runs.** No external SaaS, no third-party access to your codebase. PO Agent runs inside GitHub Actions on your own runners. Your code never leaves your CI environment.
+
+**Autonomous but interruptible.** The agent handles the full loop — implementation, CI, review, resume — without human intervention. But it stops and asks when confidence is low, scope is unclear, or a human decision is needed.
+
+**Budget-aware.** Every session tracks cost. Set a budget cap per run, and the agent will optimise its approach to stay within it. No surprise bills.
+
+---
+
 ## Quick Start (2 minutes)
 
 ### 1. Copy this workflow to your repo
