@@ -1,0 +1,102 @@
+name: "Request for Skill (RFS)"
+description: "Propose a new skill or extension to an existing skill for PO Agent."
+title: "RFS: "
+labels: ["rfs", "rfs:proposed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Request for Skill
+
+        Use this form to propose a new behavioral skill for PO Agent, or an extension to an existing one.
+        RFS issues are typically filed by the agent itself when it detects a gap during execution.
+
+  - type: input
+    id: skill-name
+    attributes:
+      label: Skill Name
+      description: "Proposed name for the skill (kebab-case, e.g., `database-migrations`)"
+      placeholder: "my-new-skill"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gap-type
+    attributes:
+      label: Gap Type
+      description: "Is this a completely new skill, or an extension of an existing one?"
+      options:
+        - new-skill
+        - skill-extension
+    validations:
+      required: true
+
+  - type: input
+    id: extends-skill
+    attributes:
+      label: Extends Skill
+      description: "If gap type is `skill-extension`, which existing skill does this extend? (N/A otherwise)"
+      placeholder: "bug-fix-workflow"
+
+  - type: dropdown
+    id: installation-target
+    attributes:
+      label: Installation Target
+      description: "Where should this skill be installed?"
+      options:
+        - consumer — .po-agent/skills/ (project-specific)
+        - framework — built-in to po-agent (benefits all users)
+    validations:
+      required: true
+
+  - type: textarea
+    id: trigger-context
+    attributes:
+      label: Trigger Context
+      description: "What was the agent doing when it detected the gap?"
+      placeholder: |
+        - Task type: Setting up database migrations
+        - Skills consulted: /story-workflow, /mandatory-gates
+        - Why existing skills fell short: No skill covers database schema management patterns
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired-behavior
+    attributes:
+      label: Desired Behavior
+      description: "What should the skill teach the agent to do?"
+      placeholder: "The skill should guide the agent through creating migration files, running them against a dev database, and verifying schema changes before committing."
+    validations:
+      required: true
+
+  - type: textarea
+    id: draft-skill
+    attributes:
+      label: Draft SKILL.md
+      description: "If enough context exists, draft the SKILL.md content. Otherwise write 'Needs human authoring.'"
+      render: markdown
+      placeholder: |
+        ---
+        name: my-skill
+        description: One-line description of what this skill does.
+        disable-model-invocation: true
+        ---
+
+        # My Skill
+
+        Instructions here...
+
+  - type: input
+    id: source-run
+    attributes:
+      label: Source Run
+      description: "Link to the GitHub Actions run or PR where the gap was detected."
+      placeholder: "https://github.com/org/repo/actions/runs/12345"
+
+  - type: textarea
+    id: additional-gaps
+    attributes:
+      label: Additional Gaps
+      description: "Other gaps detected in the same run that were not filed as separate RFS issues."
+      placeholder: "None"

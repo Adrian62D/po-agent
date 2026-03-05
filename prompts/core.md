@@ -52,3 +52,4 @@ Use these skills when you need detailed instructions:
 | Wait for CI / preview | `/ci-wait-resume` |
 | Manage budget | `/budget-management` |
 | Verify with Playwright | `/playwright-verify` |
+| Report a missing skill capability | `/rfs-proposal` |

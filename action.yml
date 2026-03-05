@@ -583,6 +583,12 @@ runs:
         # Build system prompt
         cp "$ACTION_DIR/prompts/core.md" /tmp/prompt.txt
 
+        # Add RFS detection prompt
+        if [ -f "$ACTION_DIR/prompts/rfs-detection.md" ]; then
+          echo "" >> /tmp/prompt.txt
+          cat "$ACTION_DIR/prompts/rfs-detection.md" >> /tmp/prompt.txt
+        fi
+
         # Add source-specific prompt
         SOURCE_PROMPT="$ACTION_DIR/prompts/source-${SOURCE}.md"
         if [ -f "$SOURCE_PROMPT" ]; then
