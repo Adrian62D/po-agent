@@ -28,7 +28,7 @@
 
 We want to **enable every organisation to have a 24/7 dev factory.**
 
-Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder or a small team — you deserve an autonomous developer that investigates, implements, tests, and delivers around the clock. Not a copilot that waits for you to type. A teammate that picks up work, finishes it, and asks for review.
+Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder or a small team — you deserve autonomous machinery that investigates, implements, tests, and delivers around the clock. Not a copilot that waits for you to type. A teammate that picks up work, finishes it, and asks for review.
 
 Let's build, build, build.
 
