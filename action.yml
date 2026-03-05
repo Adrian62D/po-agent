@@ -204,17 +204,20 @@ runs:
 
         # 2. Post "Starting work..." comment
         COMMENT_BODY="<p>🤖 <strong>Starting work...</strong></p><p>Follow progress: <a href=\"${WORKFLOW_URL}\">workflow run</a></p>"
-        echo "::debug::AZDO_URL=${AZDO_URL}"
-        echo "::debug::AUTH length=$(echo -n "$AUTH" | wc -c)"
-        HTTP_CODE=$(curl -s -o /tmp/azdo_response.txt -w "%{http_code}" -X POST \
+        echo "::warning::AZDO_URL=${AZDO_URL}"
+        echo "::warning::AUTH length=$(echo -n "$AUTH" | wc -c)"
+        echo "::warning::PAT length=$(echo -n "$AZURE_DEVOPS_PAT" | wc -c)"
+        HTTP_CODE=$(curl -s --http1.1 -o /tmp/azdo_response.txt -w "%{http_code}" -X POST \
           "${AZDO_URL}/comments?api-version=7.1-preview.4" \
           -H "Authorization: Basic $AUTH" \
           -H "Content-Type: application/json" \
           -d "{\"text\": \"$COMMENT_BODY\"}" 2>/tmp/azdo_curl_err.txt)
         if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
           echo "::warning::Failed to post AzDo comment (HTTP $HTTP_CODE)"
-          echo "::debug::curl stderr: $(cat /tmp/azdo_curl_err.txt 2>/dev/null)"
-          echo "::debug::response: $(cat /tmp/azdo_response.txt 2>/dev/null | head -c 500)"
+          echo "::warning::curl stderr: $(cat /tmp/azdo_curl_err.txt 2>/dev/null)"
+          echo "::warning::response body: $(cat /tmp/azdo_response.txt 2>/dev/null | head -c 500)"
+        else
+          echo "::notice::Successfully posted AzDo comment (HTTP $HTTP_CODE)"
         fi
 
         # 3. Set po-agent:in-progress tag
@@ -240,7 +243,7 @@ runs:
           -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" 2>/tmp/azdo_tags_err.txt)
         if [ "$HTTP_CODE" != "200" ]; then
           echo "::warning::Failed to update AzDo tags (HTTP $HTTP_CODE)"
-          echo "::debug::response: $(cat /tmp/azdo_tags_response.txt 2>/dev/null | head -c 500)"
+          echo "::warning::tags response: $(cat /tmp/azdo_tags_response.txt 2>/dev/null | head -c 500)"
         fi
 
     # ── 3. Install Claude Code CLI ──────────────────────────────────────
